@@ -1,0 +1,52 @@
+// Complete DAX Calculation Suite for EHEDP
+
+// 1. Total Attendees
+Total Attendees =
+SUM ( Fact_YearlyMetrics[attendees] )
+
+// 2. Total Graduates
+Total Graduates =
+SUM ( Fact_YearlyMetrics[graduates] )
+
+// 3. Overall Completion Rate
+Completion Rate =
+DIVIDE (
+    [Total Graduates],
+    [Total Attendees],
+    0
+)
+
+// 4. Prior Year Attendees
+Total Attendees PY =
+CALCULATE (
+    [Total Attendees],
+    SAMEPERIODLASTYEAR ( Dim_Calendar[Date] )
+)
+
+// 5. Attendees YoY Growth %
+Attendees YoY Growth % =
+VAR CurrentVal = [Total Attendees]
+VAR PriorVal   = [Total Attendees PY]
+RETURN
+    DIVIDE ( CurrentVal - PriorVal, PriorVal, 0 )
+
+// 6. Dynamic University Page Header
+Dynamic University Title =
+VAR SelectedUni =
+    SELECTEDVALUE ( Dim_University[name], "All European Universities" )
+VAR SelectedYear =
+    SELECTEDVALUE ( Fact_YearlyMetrics[academic_year], "Multi-Year View" )
+RETURN
+    "Performance Review: " & SelectedUni & " (" & SelectedYear & ")"
+
+// 7. Conditional Formatting Rules for Matrix Views
+Department Growth Status =
+VAR Growth = [Attendees YoY Growth %]
+RETURN
+    SWITCH (
+        TRUE (),
+        ISBLANK ( Growth ), "#CCCCCC",  -- Neutral Gray (No prior year)
+        Growth > 0.05,      "#107C41",  -- Soft Green (>5% Growth)
+        Growth < -0.05,     "#A80000",  -- Soft Red (<-5% Decline)
+        "#D13438"                       -- Amber / Flat
+    )
