@@ -1,0 +1,454 @@
+European Higher Education Data Platform (EHEDP)
+Comprehensive Technical Specification, Data Architecture & Pipeline Blueprint
+Attribute
+Specification Value
+Target RDBMS Engine
+PostgreSQL 16+ (Declarative List Partitioning)
+Connection Middleware
+PgBouncer (Transaction-Level Connection Pooling on Port 6432)
+Orchestration Engine
+Python 3.11+ (psycopg3, psycopg_pool, concurrent.futures)
+Container Infrastructure
+Docker & Docker Compose (Isolated Services)
+Analytics & BI Layer
+Power BI Desktop (Star Schema Model, DAX Engine, DirectQuery/Import)
+Primary Data Sources
+ETER API, Eurostat REST API (educ_uoe), DEQAR Web API, U-Multirank
+1. Executive Summary & Solution Description
+The European Higher Education Data Platform (EHEDP) is an enterprise-grade data platform engineered to ingest, harmonize, store, and analyze higher education metrics across European nations. The architecture addresses the structural complexity of European tertiary education, where university models, degree structures, and grading systems vary widely across borders.
+1.1 Background & Engineering Challenges
+A primary hurdle in cross-European educational analytics is that Grade Point Average (GPA) is not standardized across the European Higher Education Area (EHEA). Countries utilize disparate evaluation scales (e.g., 1–10 in Spain/Netherlands, 1.0–5.0 in Germany, 1–30 in Italy). Rather than enforcing artificial GPA conversions, EHEDP replaces GPA with standardized proxy metrics: academic completion rates, yearly attendees, graduate counts by ISCED-F degree fields, and ECTS credit progression.
+From a technical standpoint, processing over 3,500 Higher Education Institutions (HEIs) across 40 countries requires resolving severe data pipeline bottlenecks:
+Concurrency Bottlenecks:  Database lock contention when multiple worker threads attempt concurrent writes into shared parent tables.
+Storage & Query Scale:  Managing billions of metric records without suffering query degradation over multi-year trend analysis.
+Targeted Refresh Efficiency:  Ensuring that localized data updates (e.g., refreshing a single university's 2023 counts) execute in milliseconds without acquiring global table locks.
+1.2 Core Architectural Principles
+To overcome these challenges, EHEDP implements four architectural pillars:
+Partition-Isolated Processing:  Every university is assigned a dedicated physical table partition using PostgreSQL List Partitioning. Worker threads writing to University A never touch or lock University B's partition.
+Thread Pool & Connection Pooling:  High-concurrency Python worker threads are proxied through PgBouncer operating in transaction mode, keeping database connection overhead near zero.
+Atomic Upserts:  All data inserts and updates utilize atomic MERGE / ON CONFLICT stored procedures, guaranteeing idempotency during re-runs or targeted data refreshes.
+Multi-Source Analytics Handoff:  Power BI supports DirectQuery, automated CSV folder parsing, and embedded Python threading scripts for chunked data retrieval.
+[CORE ARCHITECTURAL PATTERN]By enforcing a strict '1 Thread = 1 University Partition' mapping during pipeline execution, database writes achieve near-linear horizontal scaling across multi-core processors without triggering SQL deadlock exceptions.
+2. Public Data Sources & API Endpoints
+The EHEDP pipeline ingests data from four primary European data providers. Below are the exact REST API endpoints, query parameters, authentication details, and payload mapping rules.
+2.1 European Tertiary Education Register (ETER) / EHESO API
+ETER provides micro-level institutional metrics for ~3,500 higher education institutions across Europe.
+Base URL: https://www.eter-project.com/api/
+Institutions Endpoint: https://www.eter-project.com/api/v1/institutions
+Authentication: None (Public Open API). Optional bearer token for high-frequency access.
+Supported Formats: JSON / CSV Export.
+Key Request Parameters:
+country: Filter by ISO 2-letter country code (e.g., DE, FR, NL, HU).
+year: Target academic collection year (e.g., 2021, 2022, 2023).
+fields: Comma-separated metric fields (e.g., eids, name, total_students, graduates_bachelor, graduates_master, graduates_phd).
+Sample HTTP GET Request (ETER API):
+GET /api/v1/institutions?country=DE&year=2021&fields=id,official_name,country,total_students,graduates_bachelor,graduates_master,graduates_phd HTTP/1.1
+Host: www.eter-project.com
+Accept: application/json
+2.2 Eurostat REST API (UOE Data Collection: educ_uoe)
+Eurostat provides harmonized macro-level and regional statistics on educational enrolments and graduates governed by UNESCO, OECD, and Eurostat (UOE).
+Base API URL: https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/
+Authentication: No authentication required (Public REST API).
+Response Formats: JSON-stat 2.0, SDMX-CSV, TSV.
+Primary Eurostat Dataset Endpoints:
+1. Enrolments by ISCED field & sex: https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/educ_uoe_enrp01
+2. Graduates by ISCED level & field: https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/educ_uoe_grad01
+3. First-time Entrants: https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/educ_uoe_entp01
+Sample HTTP GET Request (Eurostat API):
+GET /eurostat/api/dissemination/statistics/1.0/data/educ_uoe_enrp01?format=JSON&lang=en&time=2022&isced11=ED5&geo=DE HTTP/1.1
+Host: ec.europa.eu
+Accept: application/json
+2.3 DEQAR / EQAR Connect API
+The Database of External Quality Assurance Reports (DEQAR) provides quality assurance decisions, accreditation status, and institutional profiles across the European Higher Education Area.
+Connect API Base URL: https://backend.deqar.eu/connectapi/v1/
+Institutions Endpoint: https://backend.deqar.eu/connectapi/v1/institutions/
+Authentication: Public GET endpoints for institution search; token required for report submission.
+Sample HTTP GET Request (DEQAR API):
+GET /connectapi/v1/institutions/?query=Munich&country=DE HTTP/1.1
+Host: backend.deqar.eu
+Accept: application/json
+2.4 API Mapping Matrix to System Schema
+The following table illustrates how raw JSON payloads from public APIs map directly into EHEDP database entities:
+Public Data Field
+API Source
+Target Database Table
+Target Column
+official_name
+ETER / DEQAR
+university
+name
+country
+ETER / Eurostat
+university
+country_code
+level_name (ISCED 5-8)
+Eurostat / ETER
+degree_level
+level_name
+isced_f_code / course_name
+Eurostat (educ_uoe)
+course_type
+course_name
+total_students / enrolments
+ETER / Eurostat
+yearly_metrics
+attendees
+graduates_bachelor / master
+ETER / Eurostat
+yearly_metrics
+graduates
+collection_year
+All APIs
+yearly_metrics
+academic_year
+3. Tech Stack & Infrastructure Design
+The EHEDP tech stack is curated strictly from open-source technologies to maximize operational throughput while eliminating licensing costs.
+Component
+Selected Technology
+License
+Architectural Rationale
+Database Engine
+PostgreSQL 16+
+PostgreSQL License
+Native list partitioning, PL/pgSQL stored routines, high bulk write speeds.
+Connection Proxy
+PgBouncer 1.21+
+MIT
+Transaction-level connection pooling prevents thread exhaustion under concurrency.
+Ingestion Engine
+Python 3.11+
+PSFL
+Native ThreadPoolExecutor paired with C-optimized psycopg3 database driver.
+Container Stack
+Docker Compose v2
+Apache 2.0 / Free
+Encapsulated infrastructure replication, volume persistence, isolated networks.
+Analytics Engine
+Power BI Desktop
+Free Tier
+Rich DAX calculations, Star Schema modeling, multi-source dynamic M query routing.
+3.1 High-Speed Database Tuning Parameters
+To maximize multi-threaded batch insertion speed, PostgreSQL is configured with the following runtime flags inside the Docker container:
+synchronous_commit = off: Disables waiting for WAL writes to flush to disk on every transaction. Increases bulk insert throughput by 3x to 5x while maintaining full crash recovery consistency for completed batches.
+shared_buffers = 512MB: Allocates 512MB RAM for caching table indexes and data pages.
+work_mem = 16MB: Allocates 16MB per query operation for in-memory sorting and hash tables.
+enable_partition_pruning = on: Ensures the query engine automatically bypasses non-relevant university table partitions during execution.
+4. Container Infrastructure Deployment
+The entire database infrastructure is deployed via Docker Compose. PgBouncer sits in front of PostgreSQL, routing multi-threaded requests on port 6432.
+version: '3.8'
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres_edu_db
+    environment:
+      POSTGRES_DB: edu_metrics
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    command: >
+      postgres
+      -c max_connections=100
+      -c shared_buffers=512MB
+      -c work_mem=16MB
+      -c synchronous_commit=off
+  pgbouncer:
+    image: edoburu/pgbouncer
+    container_name: pgbouncer_pool
+    environment:
+      DB_USER: postgres
+      DB_PASSWORD: postgrespassword
+      DB_HOST: postgres
+      DB_NAME: edu_metrics
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 500
+      DEFAULT_POOL_SIZE: 20
+    ports:
+      - "6432:6432"
+    depends_on:
+      - postgres
+volumes:
+  pgdata:
+5. Relational Schema & Stored Routines
+The database consists of a master unpartitioned `university` table, reference tables (`degree_level`, `course_type`), an audit log (`ingestion_audit_log`), and the list-partitioned metric table (`yearly_metrics`).
+5.1 Database DDL Script (init_schema.sql)
+-- 1. Master University Table (Unpartitioned)
+CREATE TABLE university (
+    uni_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    country_code VARCHAR(5) NOT NULL
+);
+-- 2. Degree Level Reference Table
+CREATE TABLE degree_level (
+    degree_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    level_name VARCHAR(50) NOT NULL UNIQUE
+);
+-- Seed Default Degree Levels
+INSERT INTO degree_level (level_name)
+VALUES ('Bachelor'), ('Master'), ('PhD')
+ON CONFLICT DO NOTHING;
+-- 3. Course Type Table
+CREATE TABLE course_type (
+    course_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    uni_id INT NOT NULL,
+    degree_id INT NOT NULL REFERENCES degree_level(degree_id),
+    course_name VARCHAR(255) NOT NULL,
+    CONSTRAINT uq_uni_course UNIQUE (uni_id, course_name, degree_id)
+);
+-- 4. Audit Log Table
+CREATE TABLE ingestion_audit_log (
+    log_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    uni_id INT NOT NULL,
+    academic_year INT NOT NULL,
+    records_processed INT DEFAULT 0,
+    status VARCHAR(50) NOT NULL,
+    executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+-- 5. Partitioned Yearly Metrics Table (Parent)
+CREATE TABLE yearly_metrics (
+    metric_id INT GENERATED ALWAYS AS IDENTITY,
+    uni_id INT NOT NULL,
+    course_id INT NOT NULL,
+    academic_year INT NOT NULL,
+    attendees INT DEFAULT 0,
+    graduates INT DEFAULT 0,
+    PRIMARY KEY (metric_id, uni_id),
+    CONSTRAINT uq_course_year UNIQUE (course_id, academic_year, uni_id)
+) PARTITION BY LIST (uni_id);
+-- 6. Idempotent Upsert Function (PL/pgSQL Procedure)
+CREATE OR REPLACE FUNCTION sp_upsert_yearly_metrics(
+    p_uni_id INT,
+    p_course_id INT,
+    p_year INT,
+    p_attendees INT,
+    p_graduates INT
+) RETURNS VOID AS $$
+BEGIN
+    INSERT INTO yearly_metrics (uni_id, course_id, academic_year, attendees, graduates)
+    VALUES (p_uni_id, p_course_id, p_year, p_attendees, p_graduates)
+    ON CONFLICT (course_id, academic_year, uni_id)
+    DO UPDATE SET
+        attendees = EXCLUDED.attendees,
+        graduates = EXCLUDED.graduates;
+END;
+$$ LANGUAGE plpgsql;
+-- 7. Automatic Partition Creation Trigger Function
+CREATE OR REPLACE FUNCTION trg_auto_create_university_partition()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_partition_name TEXT;
+BEGIN
+    v_partition_name := 'yearly_metrics_uni_' || NEW.uni_id;
+
+    EXECUTE format(
+        'CREATE TABLE IF NOT EXISTS %I PARTITION OF yearly_metrics FOR VALUES IN (%L);',
+        v_partition_name,
+        NEW.uni_id
+    );
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_university_after_insert
+AFTER INSERT ON university
+FOR EACH ROW
+EXECUTE FUNCTION trg_auto_create_university_partition();
+6. Multi-Threaded Ingestion Engine
+The ingestion layer consists of two standalone, robust Python modules: a partition manager that audits and builds required partition tables, and a concurrent ingestion worker engine.
+6.1 Partition Manager (`manage_partitions.py`)
+import logging
+import os
+import psycopg
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+DB_URI = os.getenv("DATABASE_URL", "postgresql://postgres:postgrespassword@localhost:6432/edu_metrics")
+PARTITIONED_TABLES = ["yearly_metrics"]
+def get_all_university_ids(conn: psycopg.Connection) -> list[int]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT uni_id FROM university ORDER BY uni_id ASC;")
+        return [row[0] for row in cur.fetchall()]
+def get_existing_partitions(conn: psycopg.Connection, parent_table: str) -> set[str]:
+    query = """
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_inherits i ON c.oid = i.inhrelid
+        JOIN pg_class p ON p.oid = i.inhparent
+        WHERE p.relname = %s;
+    """
+    with conn.cursor() as cur:
+        cur.execute(query, (parent_table,))
+        return {row[0] for row in cur.fetchall()}
+def create_missing_partitions():
+    try:
+        with psycopg.connect(DB_URI, autocommit=True) as conn:
+            uni_ids = get_all_university_ids(conn)
+            logging.info(f"Found {len(uni_ids)} total universities registered.")
+            for parent_table in PARTITIONED_TABLES:
+                existing_partitions = get_existing_partitions(conn, parent_table)
+                created_count = 0
+                for uni_id in uni_ids:
+                    partition_name = f"{parent_table}_uni_{uni_id}"
+                    if partition_name not in existing_partitions:
+                        ddl_sql = f"""
+                            CREATE TABLE IF NOT EXISTS {partition_name}
+                            PARTITION OF {parent_table}
+                            FOR VALUES IN ({uni_id});
+                        """
+                        with conn.cursor() as cur:
+                            cur.execute(ddl_sql)
+                        logging.info(f"Created partition: {partition_name}")
+                        created_count += 1
+                logging.info(f"Table '{parent_table}': {created_count} new partitions created.")
+    except Exception as e:
+        logging.error(f"Error during partition maintenance: {e}")
+        raise
+if __name__ == "__main__":
+    create_missing_partitions()
+6.2 High-Throughput Ingestion Engine (`ingest_engine.py`)
+import concurrent.futures
+from psycopg_pool import ConnectionPool
+import logging
+import os
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(threadName)s - %(message)s")
+DB_URI = os.getenv("DATABASE_URL", "postgresql://postgres:postgrespassword@localhost:6432/edu_metrics")
+pool = ConnectionPool(conninfo=DB_URI, min_size=2, max_size=25)
+def worker_load_university(uni_id: int, target_year: int) -> str:
+    """
+    Worker task: Processes ONE university exclusively on a dedicated thread.
+    Executes atomic upserts into the uni-specific partition via PgBouncer.
+    """
+    # Simulated API data fetch for University uni_id
+    dummy_records = [
+        {"course_id": 1, "attendees": 450, "graduates": 120},
+        {"course_id": 2, "attendees": 200, "graduates": 85},
+        {"course_id": 3, "attendees": 310, "graduates": 95}
+    ]
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            processed = 0
+            for rec in dummy_records:
+                cur.execute(
+                    "SELECT sp_upsert_yearly_metrics(%s, %s, %s, %s, %s);",
+                    (uni_id, rec["course_id"], target_year, rec["attendees"], rec["graduates"])
+                )
+                processed += 1
+
+            # Log successful execution in audit table
+            cur.execute(
+                """
+                INSERT INTO ingestion_audit_log (uni_id, academic_year, records_processed, status)
+                VALUES (%s, %s, %s, %s);
+                """,
+                (uni_id, target_year, processed, "SUCCESS")
+            )
+        conn.commit()
+    return f"University {uni_id} loaded successfully ({processed} records)"
+def run_pipeline(uni_ids: list[int], target_year: int, max_threads: int = 8):
+    logging.info(f"Starting parallel pipeline for Year {target_year} across {len(uni_ids)} universities using {max_threads} threads.")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_threads) as executor:
+        futures = {
+            executor.submit(worker_load_university, uni, target_year): uni
+            for uni in uni_ids
+        }
+        for future in concurrent.futures.as_completed(futures):
+            uni = futures[future]
+            try:
+                result = future.result()
+                logging.info(result)
+            except Exception as e:
+                logging.error(f"Failed loading University {uni}: {e}")
+if __name__ == "__main__":
+    universities = [101, 102, 103, 104, 105, 106, 107, 108]
+    run_pipeline(uni_ids=universities, target_year=2024, max_threads=4)
+7. Power BI Visualization Layer & Analytics
+The frontend reporting layer is built in Power BI Desktop. It supports dynamic data ingestion switching between Database DirectQuery/Import, CSV folder parsing, and embedded Python threading scripts.
+7.1 Power Query Dynamic Data Selector (M Code)
+Define a parameter `DataSourceType` with possible values: `'DB'`, `'CSV'`, or `'PYTHON'`. The following Power Query M script routes execution accordingly:
+let
+    SourceType = DataSourceType,
+
+    // Source 1: PostgreSQL Direct Database Connection via PgBouncer
+    DBSource = PostgreSQL.Database("localhost:6432", "edu_metrics", [Query="SELECT * FROM yearly_metrics"]),
+
+    // Source 2: Combined CSV Folder Directory
+    CSVSource = Folder.Files("C:\Data\HigherEduCSVs"),
+    CombinedCSV = Table.Combine(List.Transform(CSVSource[Content], Csv.Document)),
+
+    // Source 3: Embedded Python Threading Loader
+    PythonSource = Python.Execute(
+        "import pandas as pd#(lf)" &
+        "import concurrent.futures#(lf)" &
+        "def fetch(u): return pd.DataFrame([{'uni_id': u, 'academic_year': 2024, 'attendees': 5000, 'graduates': 1200}])#(lf)" &
+        "with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:#(lf)" &
+        "    res = list(ex.map(fetch, [101,102,103,104,105]) harvest)#(lf)" &
+        "final_dataset = pd.concat(res, ignore_index=True)"
+    ){[Name="final_dataset"]}[Data],
+    // Dynamic Switch Evaluation
+    FinalDataset = if SourceType = "DB" then DBSource
+                   else if SourceType = "CSV" then CombinedCSV
+                   else PythonSource
+in
+    FinalDataset
+7.2 Complete DAX Calculation Suite
+The following formulas define the core analytical measures in the Power BI Star Schema model:
+// 1. Total Attendees
+Total Attendees =
+SUM ( Fact_YearlyMetrics[attendees] )
+// 2. Total Graduates
+Total Graduates =
+SUM ( Fact_YearlyMetrics[graduates] )
+// 3. Overall Completion Rate
+Completion Rate =
+DIVIDE (
+    [Total Graduates],
+    [Total Attendees],
+    0
+)
+// 4. Prior Year Attendees
+Total Attendees PY =
+CALCULATE (
+    [Total Attendees],
+    SAMEPERIODLASTYEAR ( Dim_Calendar[Date] )
+)
+// 5. Attendees YoY Growth %
+Attendees YoY Growth % =
+VAR CurrentVal = [Total Attendees]
+VAR PriorVal   = [Total Attendees PY]
+RETURN
+    DIVIDE ( CurrentVal - PriorVal, PriorVal, 0 )
+// 6. Dynamic University Page Header
+Dynamic University Title =
+VAR SelectedUni =
+    SELECTEDVALUE ( Dim_University[name], "All European Universities" )
+VAR SelectedYear =
+    SELECTEDVALUE ( Fact_YearlyMetrics[academic_year], "Multi-Year View" )
+RETURN
+    "Performance Review: " & SelectedUni & " (" & SelectedYear & ")"
+// 7. Conditional Formatting Rules for Matrix Views
+Department Growth Status =
+VAR Growth = [Attendees YoY Growth %]
+RETURN
+    SWITCH (
+        TRUE (),
+        ISBLANK ( Growth ), "#CCCCCC",  -- Neutral Gray (No prior year)
+        Growth > 0.05,      "#107C41",  -- Soft Green (>5% Growth)
+        Growth < -0.05,     "#A80000",  -- Soft Red (<-5% Decline)
+        "#D13438"                       -- Amber / Flat
+    )
+7.3 Dashboard Visual Layout Design
+The Power BI workbook is organized into two dedicated reporting views:
+Page 1: European Macro Overview — Displays total European student volume, total graduates, choropleth map colored by country-level enrolment, and stacked bar charts comparing Bachelor vs. Master vs. PhD distributions.
+Page 2: University Partition Deep-Dive — Triggered by selecting an individual institution. Displays dynamic header title, 5-year trend line chart for attendees/graduates, and a course-level matrix table with conditional green/red growth highlighting.
+8. Operational Runbook & Execution Sequence
+To deploy and execute the platform from scratch, follow this operational runbook:
+Step 1: Spin up the PostgreSQL and PgBouncer containers using `docker-compose up -d`.
+Step 2: Connect to PostgreSQL on port 5432 and execute `init_schema.sql` to initialize base tables, stored functions, and triggers.
+Step 3: Run `python manage_partitions.py` to audit university entities and verify that list partition tables exist for every `uni_id`.
+Step 4: Execute `python ingest_engine.py` to launch multi-threaded parallel data loading through PgBouncer on port 6432.
+Step 5: Open Power BI Desktop, select `DataSourceType` ('DB', 'CSV', or 'PYTHON'), and refresh report visuals.
