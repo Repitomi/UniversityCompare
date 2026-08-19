@@ -2,11 +2,11 @@
 
 // 1. Total Attendees
 Total Attendees =
-SUM ( YearlyMetrics[attendees] )
+SUM ( Fact_YearlyMetrics[attendees] )
 
 // 2. Total Graduates
 Total Graduates =
-SUM ( YearlyMetrics[graduates] )
+SUM ( Fact_YearlyMetrics[graduates] )
 
 // 3. Overall Completion Rate
 Completion Rate =
@@ -20,7 +20,7 @@ DIVIDE (
 Total Attendees PY =
 CALCULATE (
     [Total Attendees],
-    SAMEPERIODLASTYEAR ( Calendar[Date] )
+    SAMEPERIODLASTYEAR ( Dim_Calendar[Date] )
 )
 
 // 5. Attendees YoY Growth %
@@ -33,9 +33,9 @@ RETURN
 // 6. Dynamic University Page Header
 Dynamic University Title =
 VAR SelectedUni =
-    SELECTEDVALUE ( University[name], "All European Universities" )
+    SELECTEDVALUE ( Dim_University[name], "All European Universities" )
 VAR SelectedYear =
-    SELECTEDVALUE ( YearlyMetrics[academic_year], "Multi-Year View" )
+    SELECTEDVALUE ( Fact_YearlyMetrics[academic_year], "Multi-Year View" )
 RETURN
     "Performance Review: " & SelectedUni & " (" & SelectedYear & ")"
 
